@@ -41,12 +41,26 @@ BUILD_DIR=$1
 CACHE_DIR=$2
 ENV_DIR=$3
 
+# The version an app gets when it does not ask for one. Upstream resolved "latest"
+# here, which means an app that has not changed can stop building because someone
+# else shipped a release. That is exactly what happened: Crystal 1.21.0 aborts with
+# an arithmetic overflow in `default_workers_count` before compiling a line of app
+# code, and every app on this buildpack broke at once with no change of their own.
+#
+# A default that moves under you is not a default. Pin it, and bump it deliberately.
+DEFAULT_CRYSTAL_VERSION=${DEFAULT_CRYSTAL_VERSION:-1.19.1}
+
 if [ -f $BUILD_DIR/.crystal-version ]; then
   CRYSTAL_VERSION=`cat $BUILD_DIR/.crystal-version | tr -d '\012'`
   CRYSTAL_VERSION_REASON='due to .crystal-version file'
+  # Opting back in to the old behaviour stays possible, but you have to ask for it.
+  if [ "$CRYSTAL_VERSION" = "latest" ]; then
+    CRYSTAL_VERSION=`${CURL} https://api.github.com/repos/crystal-lang/crystal/releases/latest | json_value tag_name 1 | tr -d '\012'`
+    CRYSTAL_VERSION_REASON='due to .crystal-version file requesting latest'
+  fi
 else
-  CRYSTAL_VERSION=`${CURL} https://api.github.com/repos/crystal-lang/crystal/releases/latest | json_value tag_name 1 | tr -d '\012'`
-  CRYSTAL_VERSION_REASON='due to latest release at https://github.com/crystal-lang/crystal'
+  CRYSTAL_VERSION=$DEFAULT_CRYSTAL_VERSION
+  CRYSTAL_VERSION_REASON='default pinned by this buildpack; set .crystal-version to override'
 fi
 
 CRYSTAL_URL=`${CURL} https://api.github.com/repos/crystal-lang/crystal/releases/tags/${CRYSTAL_VERSION} | grep 'https://github.com/crystal-lang/crystal/releases/download/.*-linux-x86_64.tar.gz' | sed 's/.*: "\(.*\)"/\1/'`

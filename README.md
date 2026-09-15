@@ -1,3 +1,33 @@
+> [!NOTE]
+> **This is Build.io's fork.** Upstream `crystal-lang/heroku-buildpack-crystal` was
+> archived on 2025-01-07; its last functional commit was in June 2018. We maintain
+> this copy because we still run Crystal apps and no maintained Cloud Native
+> Buildpack for Crystal exists — the community options are all classic Heroku
+> buildpacks, and all of them are unmaintained.
+>
+> ### Why the default version is pinned
+>
+> Upstream resolved the Crystal version to **the latest GitHub release at build
+> time** whenever an app had no `.crystal-version` file. That is not a default, it
+> is a moving target: an app that had not changed in months could stop building
+> because someone else shipped a release.
+>
+> That is not hypothetical. Crystal **1.21.0** aborts during `bin/compile` with:
+>
+> ```
+> E: Error executing crystal:
+> Unhandled exception: Arithmetic overflow (OverflowError)
+>   from /crystal/src/slice.cr:271:34 in 'default_workers_count'
+> ```
+>
+> It crashes computing its own worker count, before compiling a line of app code,
+> so every app on this buildpack broke at once and none of them had changed.
+>
+> `bin/compile` now pins `DEFAULT_CRYSTAL_VERSION` instead. Apps that want a
+> specific version still use `.crystal-version`, and `.crystal-version` containing
+> the literal `latest` restores the old float-to-newest behaviour for anyone who
+> wants it. Bumping the default is a deliberate commit here, which is the point.
+
 > [!IMPORTANT]
 > This library is no longer supported or updated by the Crystal Team,
 > therefore we have archived the repository.
