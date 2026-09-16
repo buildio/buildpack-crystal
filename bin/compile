@@ -41,12 +41,31 @@ BUILD_DIR=$1
 CACHE_DIR=$2
 ENV_DIR=$3
 
+# The version an app gets when it does not ask for one. Upstream resolved "latest"
+# here, which means an app that has not changed can stop building because someone
+# else shipped a release. That is exactly what happened: Crystal 1.21.0 aborts with
+# an arithmetic overflow in `default_workers_count` before compiling a line of app
+# code, and every app on this buildpack broke at once with no change of their own.
+#
+# A default that moves under you is not a default. Pin it, and bump it deliberately.
+#
+# 1.20.3 is the last release before 1.21.0 made execution contexts the default,
+# which is what put the overflowing CPU probe on the compiler's startup path. The
+# CRYSTAL_WORKERS export below should make newer versions work too, but the default
+# deliberately does not depend on that being right.
+DEFAULT_CRYSTAL_VERSION=${DEFAULT_CRYSTAL_VERSION:-1.20.3}
+
 if [ -f $BUILD_DIR/.crystal-version ]; then
   CRYSTAL_VERSION=`cat $BUILD_DIR/.crystal-version | tr -d '\012'`
   CRYSTAL_VERSION_REASON='due to .crystal-version file'
+  # Opting back in to the old behaviour stays possible, but you have to ask for it.
+  if [ "$CRYSTAL_VERSION" = "latest" ]; then
+    CRYSTAL_VERSION=`${CURL} https://api.github.com/repos/crystal-lang/crystal/releases/latest | json_value tag_name 1 | tr -d '\012'`
+    CRYSTAL_VERSION_REASON='due to .crystal-version file requesting latest'
+  fi
 else
-  CRYSTAL_VERSION=`${CURL} https://api.github.com/repos/crystal-lang/crystal/releases/latest | json_value tag_name 1 | tr -d '\012'`
-  CRYSTAL_VERSION_REASON='due to latest release at https://github.com/crystal-lang/crystal'
+  CRYSTAL_VERSION=$DEFAULT_CRYSTAL_VERSION
+  CRYSTAL_VERSION_REASON='default pinned by this buildpack; set .crystal-version to override'
 fi
 
 CRYSTAL_URL=`${CURL} https://api.github.com/repos/crystal-lang/crystal/releases/tags/${CRYSTAL_VERSION} | grep 'https://github.com/crystal-lang/crystal/releases/download/.*-linux-x86_64.tar.gz' | sed 's/.*: "\(.*\)"/\1/'`
@@ -56,9 +75,40 @@ unset GIT_DIR
 # Install Crystal
 mkdir -p $CRYSTAL_DIR
 start "Installing Crystal ($CRYSTAL_VERSION $CRYSTAL_VERSION_REASON) from $CRYSTAL_URL"
+  if [ -z "$CRYSTAL_URL" ]; then
+    echo ""
+    echo " !     No linux-x86_64 build found for Crystal ${CRYSTAL_VERSION}."
+    echo " !     Check the version in .crystal-version, or unset it to take this"
+    echo " !     buildpack's pinned default (${DEFAULT_CRYSTAL_VERSION})."
+    exit 1
+  fi
   ${CURL} $CRYSTAL_URL | tar xz -C $CRYSTAL_DIR --strip-component=1
 finished
 PATH="${PATH}:${CRYSTAL_DIR}/bin:${CRYSTAL_DIR}/embedded/bin/"
+
+# Crystal decides its worker count like this (src/fiber/execution_context.cr):
+#
+#   count = ENV["CRYSTAL_WORKERS"]?.try(&.to_i?) || -1
+#   count = Crystal::System.effective_cpu_count.to_i if count == -1
+#   count = System.cpu_count.to_i if count == -1
+#
+# Those two `.to_i` calls are unchecked, so a host whose cgroup reports an absurd
+# effective CPU count raises OverflowError before any user code runs. From 1.21.0
+# execution contexts became the default, so this now fires during `crystal build`
+# itself and the compiler dies with an arithmetic overflow.
+#
+# CRYSTAL_WORKERS is read FIRST and the other two lines are guarded on count == -1,
+# so setting it skips the overflowing probe entirely. This is the actual fix: it
+# works on every Crystal version, including ones released after this commit.
+export CRYSTAL_WORKERS="${CRYSTAL_WORKERS:-4}"
+
+# The compiled binary makes the same call on startup, so the setting has to survive
+# into the dyno, not just the build.
+mkdir -p "$BUILD_DIR/.profile.d"
+cat > "$BUILD_DIR/.profile.d/crystal-workers.sh" <<'PROFILE'
+# Crystal overflows on hosts reporting an absurd CPU count; see the buildpack README.
+export CRYSTAL_WORKERS="${CRYSTAL_WORKERS:-4}"
+PROFILE
 
 # Build the project
 cd $BUILD_DIR
